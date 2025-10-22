@@ -13,3 +13,6 @@ const resultModel = new Schema({
 })
 
 export default mongoose.model('result', resultModel);
+
+
+
