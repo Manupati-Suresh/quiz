@@ -15,9 +15,8 @@ export async function getQuestions(req, res){
 /** insert all questinos */
 export async function insertQuestions(req, res){
     try {
-        Questions.insertMany({ questions, answers }, function(err, data){
-            res.json({ msg: "Data Saved Successfully...!"})
-        })
+        await Questions.create({ questions, answers });
+        res.json({ msg: "Data Saved Successfully...!"})
     } catch (error) {
         res.json({ error })
     }
@@ -49,9 +48,8 @@ export async function storeResult(req, res){
         const { username, result, attempts, points, achived } = req.body;
         if(!username && !result) throw new Error('Data Not Provided...!');
 
-        Results.create({ username, result, attempts, points, achived }, function(err, data){
-            res.json({ msg : "Result Saved Successfully...!"})
-        })
+        await Results.create({ username, result, attempts, points, achived });
+        res.json({ msg : "Result Saved Successfully...!"})
 
    } catch (error) {
         res.json({error})
