@@ -1,10 +1,9 @@
 import Questions from "../models/questionSchema.js";
 import Results from "../models/resultSchema.js";
 import User from "../models/userSchema.js";
-import { redisUtils } from '../database/redis.js';
 import questions, { answers } from '../database/data.js';
 
-/** get all questions GET */
+/** get all questions */
 export async function getQuestions(req, res){
     try {
         const q = await Questions.find();
@@ -14,7 +13,7 @@ export async function getQuestions(req, res){
     }
 }
 
-/** insert all questions POST */
+/** insert all questions */
 export async function insertQuestions(req, res){
     try {
         await Questions.create({ questions, answers });
@@ -47,14 +46,82 @@ export async function getResult(req, res){
 /** post all result */
 export async function storeResult(req, res){
    try {
-        const { username, result, attempts, points, achived } = req.body;
-        if(!username && !result) throw new Error('Data Not Provided...!');
+        const { 
+            username, 
+            result, 
+            attempts, 
+            points, 
+            achived, 
+            timeTaken,
+            startTime,
+            endTime,
+            email,
+            userAgent 
+        } = req.body;
+        
+        if(!username || !result) {
+            return res.status(400).json({ error: 'Username and result are required' });
+        }
 
-        await Results.create({ username, result, attempts, points, achived });
-        res.json({ msg : "Result Saved Successfully...!"})
+        // Get current questions and answers for reference
+        const questionsDoc = await Questions.findOne();
+        const currentQuestions = questionsDoc ? questionsDoc.questions : [];
+        const correctAnswers = questionsDoc ? questionsDoc.answers : [];
+        
+        const totalQuestions = currentQuestions.length;
+        const percentage = totalQuestions > 0 ? Math.round((points / (totalQuestions * 10)) * 100) : 0;
+
+        // Store detailed result
+        const resultData = await Results.create({ 
+            username, 
+            email: email || '',
+            result, 
+            correctAnswers,
+            questionDetails: currentQuestions,
+            attempts, 
+            points,
+            totalQuestions,
+            percentage,
+            achived,
+            timeTaken: timeTaken || 0,
+            startTime: startTime ? new Date(startTime) : new Date(),
+            endTime: endTime ? new Date(endTime) : new Date(),
+            ipAddress: req.ip || req.connection.remoteAddress,
+            userAgent: userAgent || req.get('User-Agent') || ''
+        });
+
+        // Update user statistics
+        const user = await User.findOne({ username });
+        if(user) {
+            user.totalQuizzesTaken += 1;
+            
+            // Calculate new average score
+            const allUserResults = await Results.find({ username });
+            const totalScore = allUserResults.reduce((sum, r) => sum + r.percentage, 0);
+            user.averageScore = Math.round(totalScore / allUserResults.length);
+            
+            // Update best score
+            if(percentage > user.bestScore) {
+                user.bestScore = percentage;
+            }
+            
+            user.updatedAt = new Date();
+            await user.save();
+        }
+
+        res.json({ 
+            msg: "Result Saved Successfully...!",
+            resultId: resultData._id,
+            percentage,
+            userStats: user ? {
+                totalQuizzes: user.totalQuizzesTaken,
+                averageScore: user.averageScore,
+                bestScore: user.bestScore
+            } : null
+        });
 
    } catch (error) {
-        res.json({error})
+        res.json({error: error.message})
    }
 }
 
@@ -167,42 +234,6 @@ export async function deleteQuestion(req, res){
         await questionsDoc.save();
 
         res.json({ msg: "Question Deleted Successfully" });
-    } catch (error) {
-        res.json({ error })
-    }
-}
-
-/** User Login */
-export async function userLogin(req, res){
-    try {
-        const { username, password } = req.body;
-        // Simple user validation - in production, use proper authentication
-        if(username && password && username.length > 2 && password.length > 3){
-            res.json({ success: true, msg: "User Login Successful", token: "user-token", username });
-        } else {
-            res.status(401).json({ success: false, msg: "Invalid Credentials - Username must be 3+ chars, Password 4+ chars" });
-        }
-    } catch (error) {
-        res.json({ error })
-    }
-}
-
-/** Get questions for users (without answers) */
-export async function getUserQuestions(req, res){
-    try {
-        const questionsDoc = await Questions.findOne();
-        if(!questionsDoc || !questionsDoc.questions) {
-            return res.json({ questions: [] });
-        }
-
-        // Return questions without answers for security
-        const userQuestions = questionsDoc.questions.map(q => ({
-            id: q.id,
-            question: q.question,
-            options: q.options
-        }));
-
-        res.json({ questions: userQuestions, total: userQuestions.length });
     } catch (error) {
         res.json({ error })
     }
@@ -350,60 +381,73 @@ export async function deleteAnswer(req, res){
     }
 }
 
-
-
-/** Get active users from Redis */
-export async function getActiveUsers(req, res){
+/** User Login */
+export async function userLogin(req, res){
     try {
-        const activeUsers = await redisUtils.getActiveUsers();
+        const { username, password, email, firstName, lastName } = req.body;
         
-        res.json({
-            activeUsers,
-            count: activeUsers.length,
-            timestamp: new Date()
-        });
-    } catch (error) {
-        res.json({ error: error.message })
-    }
-}
-
-/** Get Redis statistics */
-export async function getRedisStats(req, res){
-    try {
-        // This would require additional Redis commands
-        // For now, return basic info
-        res.json({
-            status: 'connected',
-            message: 'Redis is operational',
-            timestamp: new Date()
-        });
-    } catch (error) {
-        res.json({ error: error.message })
-    }
-}
-
-/** User logout - clear Redis session */
-export async function userLogout(req, res){
-    try {
-        const { userId, username } = req.body;
-        
-        if (userId) {
-            await redisUtils.deleteUserSession(userId);
+        // Simple user validation - in production, use proper authentication
+        if(!username || !password || username.length < 3 || password.length < 4){
+            return res.status(401).json({ success: false, msg: "Invalid Credentials - Username must be 3+ chars, Password 4+ chars" });
         }
+
+        // Find or create user
+        let user = await User.findOne({ username });
         
-        // Clear Express session
-        req.session.destroy((err) => {
-            if (err) {
-                console.error('Session destruction error:', err);
-            }
-        });
+        if(!user) {
+            // Create new user
+            user = await User.create({
+                username,
+                password, // In production, hash this password
+                email: email || '',
+                firstName: firstName || '',
+                lastName: lastName || '',
+                lastLogin: new Date()
+            });
+        } else {
+            // Update last login
+            user.lastLogin = new Date();
+            await user.save();
+        }
 
         res.json({ 
             success: true, 
-            msg: "Logged out successfully" 
+            msg: "User Login Successful", 
+            token: "user-token", 
+            username,
+            userId: user._id,
+            userDetails: {
+                firstName: user.firstName,
+                lastName: user.lastName,
+                email: user.email,
+                totalQuizzes: user.totalQuizzesTaken,
+                averageScore: user.averageScore,
+                bestScore: user.bestScore
+            }
         });
     } catch (error) {
         res.json({ error: error.message })
+    }
+}
+
+/** Get questions for users (without answers) */
+export async function getUserQuestions(req, res){
+    try {
+        const questionsDoc = await Questions.findOne();
+        if(!questionsDoc || !questionsDoc.questions) {
+            return res.json({ questions: [] });
+        }
+
+        // Return questions without answers for security
+        const userQuestions = questionsDoc.questions.map(q => ({
+            id: q.id,
+            question: q.question,
+            options: q.options
+        }));
+
+        res.json({ questions: userQuestions, total: userQuestions.length });
+    } catch (error) {
+        res.json({ error })
     }
 }
 
@@ -412,20 +456,6 @@ export async function getUserProfile(req, res){
     try {
         const { username } = req.params;
         
-        // Try Redis cache first
-        let cachedProfile = await redisUtils.getUserProfile(username);
-        let cachedStats = await redisUtils.getUserStats(username);
-
-        if (cachedProfile && cachedStats) {
-            return res.json({
-                user: cachedProfile,
-                stats: cachedStats.stats,
-                recentResults: cachedStats.recentResults,
-                cached: true
-            });
-        }
-
-        // Fallback to database
         const user = await User.findOne({ username }).select('-password');
         if(!user) {
             return res.status(404).json({ error: "User not found" });
@@ -435,7 +465,7 @@ export async function getUserProfile(req, res){
         const userResults = await Results.find({ username }).sort({ createdAt: -1 });
         const recentResults = userResults.slice(0, 5); // Last 5 quizzes
 
-        const responseData = {
+        res.json({
             user,
             stats: {
                 totalQuizzes: user.totalQuizzesTaken,
@@ -449,18 +479,8 @@ export async function getUserProfile(req, res){
                 points: r.points,
                 totalQuestions: r.totalQuestions,
                 timeTaken: r.timeTaken
-            })),
-            cached: false
-        };
-
-        // Cache the results
-        await redisUtils.setUserProfile(username, user);
-        await redisUtils.setUserStats(username, {
-            stats: responseData.stats,
-            recentResults: responseData.recentResults
+            }))
         });
-
-        res.json(responseData);
     } catch (error) {
         res.json({ error: error.message })
     }
@@ -488,9 +508,6 @@ export async function updateUserProfile(req, res){
         if(!user) {
             return res.status(404).json({ error: "User not found" });
         }
-
-        // Update Redis cache
-        await redisUtils.setUserProfile(username, user);
 
         res.json({ msg: "Profile updated successfully", user });
     } catch (error) {

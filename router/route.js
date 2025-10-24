@@ -56,16 +56,6 @@ router.route('/user/profile/:username')
 router.route('/user/results/:username')
         .get(controller.getUserResults) /** Get user's quiz history */
 
-/** Redis/Session Routes */
-router.route('/admin/active-users')
-        .get(controller.getActiveUsers) /** Get active users from Redis */
-
-router.route('/admin/redis-stats')
-        .get(controller.getRedisStats) /** Get Redis statistics */
-
-router.route('/user/logout')
-        .post(controller.userLogout) /** User logout - clear Redis session */
-
 export default router;
 
 

@@ -1,90 +1,62 @@
 import express from 'express';
 import morgan from 'morgan';
 import cors from 'cors';
-import session from 'express-session';
 import { config } from 'dotenv';
 import router from './router/route.js';
 
-/** import connection files */
+/** import connection file */
 import connect from './database/conn.js';
-import { connectRedis, redisClient } from './database/redis.js';
-import RedisStore from 'connect-redis';
 
 const app = express()
 
 config();
 
+// Add debugging middleware first
+app.use((req, res, next) => {
+    console.log(`${req.method} ${req.path} - ${new Date().toISOString()}`);
+    next();
+});
+
 /** app middlewares */
 app.use(morgan('tiny'));
 app.use(cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:3000',
-    credentials: true
+    origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
 }));
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-/** Session configuration (will use Redis if available) */
-const sessionConfig = {
-    secret: process.env.SESSION_SECRET || 'your-secret-key',
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-        secure: false, // Set to true in production with HTTPS
-        httpOnly: true,
-        maxAge: 1000 * 60 * 60 * 24 // 24 hours
-    }
-};
-
-// Add Redis store if available
-try {
-    if (redisClient) {
-        sessionConfig.store = new RedisStore({ client: redisClient });
-        console.log('Using Redis for session storage');
-    }
-} catch (error) {
-    console.log('Using memory store for sessions (Redis not available)');
-}
-
-app.use(session(sessionConfig));
-
-
-/** appliation port */
-const port = process.env.PORT || 8080;
-
-
-/** routes */
-app.use('/api', router) /** apis */
-
+/** application port */
+const port = process.env.PORT || 5000;
 
 app.get('/', (req, res) => {
     try {
-        res.json("Get Request")
+        res.json({ message: "Server is running!", timestamp: new Date() })
     } catch (error) {
         res.json(error)
     }
 })
 
+/** routes */
+app.use('/api', router) /** apis */
 
-
-/** start server with MongoDB (Redis is optional) */
+/** start server only when we have valid connection */
 connect().then(() => {
-    // Try to connect to Redis, but don't fail if it's not available
-    connectRedis().catch(err => {
-        console.log('Redis connection failed, continuing without Redis:', err.message);
-    });
-
     try {
         app.listen(port, () => {
             console.log(`Server connected to http://localhost:${port}`)
-            console.log('MongoDB connection established')
+            console.log(`Test the server at: http://localhost:${port}`)
+            console.log(`API endpoints available at: http://localhost:${port}/api`)
         })
     } catch (error) {
-        console.log("Cannot connect to the server");
+        console.log("Cannot connect to the server:", error);
     }
 }).catch(error => {
-    console.log("MongoDB connection error:", error);
-    console.log("Cannot start server without MongoDB");
+    console.log("Invalid Database Connection:", error);
+    // Start server anyway for testing
+    app.listen(port, () => {
+        console.log(`Server started without database on http://localhost:${port}`)
+    })
 })
-
-
-
-
