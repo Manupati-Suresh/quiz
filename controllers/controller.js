@@ -1,8 +1,10 @@
 import Questions from "../models/questionSchema.js";
 import Results from "../models/resultSchema.js";
+import User from "../models/userSchema.js";
+import { redisUtils } from '../database/redis.js';
 import questions, { answers } from '../database/data.js';
 
-/** get all questions */
+/** get all questions GET */
 export async function getQuestions(req, res){
     try {
         const q = await Questions.find();
@@ -12,7 +14,7 @@ export async function getQuestions(req, res){
     }
 }
 
-/** insert all questions */
+/** insert all questions POST */
 export async function insertQuestions(req, res){
     try {
         await Questions.create({ questions, answers });
@@ -345,5 +347,200 @@ export async function deleteAnswer(req, res){
         res.json({ msg: "Answer deleted successfully", questionId });
     } catch (error) {
         res.json({ error })
+    }
+}
+
+
+
+/** Get active users from Redis */
+export async function getActiveUsers(req, res){
+    try {
+        const activeUsers = await redisUtils.getActiveUsers();
+        
+        res.json({
+            activeUsers,
+            count: activeUsers.length,
+            timestamp: new Date()
+        });
+    } catch (error) {
+        res.json({ error: error.message })
+    }
+}
+
+/** Get Redis statistics */
+export async function getRedisStats(req, res){
+    try {
+        // This would require additional Redis commands
+        // For now, return basic info
+        res.json({
+            status: 'connected',
+            message: 'Redis is operational',
+            timestamp: new Date()
+        });
+    } catch (error) {
+        res.json({ error: error.message })
+    }
+}
+
+/** User logout - clear Redis session */
+export async function userLogout(req, res){
+    try {
+        const { userId, username } = req.body;
+        
+        if (userId) {
+            await redisUtils.deleteUserSession(userId);
+        }
+        
+        // Clear Express session
+        req.session.destroy((err) => {
+            if (err) {
+                console.error('Session destruction error:', err);
+            }
+        });
+
+        res.json({ 
+            success: true, 
+            msg: "Logged out successfully" 
+        });
+    } catch (error) {
+        res.json({ error: error.message })
+    }
+}
+
+/** Get user profile */
+export async function getUserProfile(req, res){
+    try {
+        const { username } = req.params;
+        
+        // Try Redis cache first
+        let cachedProfile = await redisUtils.getUserProfile(username);
+        let cachedStats = await redisUtils.getUserStats(username);
+
+        if (cachedProfile && cachedStats) {
+            return res.json({
+                user: cachedProfile,
+                stats: cachedStats.stats,
+                recentResults: cachedStats.recentResults,
+                cached: true
+            });
+        }
+
+        // Fallback to database
+        const user = await User.findOne({ username }).select('-password');
+        if(!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        // Get user's quiz statistics
+        const userResults = await Results.find({ username }).sort({ createdAt: -1 });
+        const recentResults = userResults.slice(0, 5); // Last 5 quizzes
+
+        const responseData = {
+            user,
+            stats: {
+                totalQuizzes: user.totalQuizzesTaken,
+                averageScore: user.averageScore,
+                bestScore: user.bestScore,
+                recentQuizzes: recentResults.length
+            },
+            recentResults: recentResults.map(r => ({
+                date: r.createdAt,
+                score: r.percentage,
+                points: r.points,
+                totalQuestions: r.totalQuestions,
+                timeTaken: r.timeTaken
+            })),
+            cached: false
+        };
+
+        // Cache the results
+        await redisUtils.setUserProfile(username, user);
+        await redisUtils.setUserStats(username, {
+            stats: responseData.stats,
+            recentResults: responseData.recentResults
+        });
+
+        res.json(responseData);
+    } catch (error) {
+        res.json({ error: error.message })
+    }
+}
+
+/** Update user profile */
+export async function updateUserProfile(req, res){
+    try {
+        const { username } = req.params;
+        const updateData = req.body;
+        
+        // Remove sensitive fields
+        delete updateData.password;
+        delete updateData.userType;
+        delete updateData._id;
+        
+        updateData.updatedAt = new Date();
+
+        const user = await User.findOneAndUpdate(
+            { username }, 
+            updateData, 
+            { new: true, select: '-password' }
+        );
+        
+        if(!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        // Update Redis cache
+        await redisUtils.setUserProfile(username, user);
+
+        res.json({ msg: "Profile updated successfully", user });
+    } catch (error) {
+        res.json({ error: error.message })
+    }
+}
+
+/** Get user's quiz history */
+export async function getUserResults(req, res){
+    try {
+        const { username } = req.params;
+        const { page = 1, limit = 10 } = req.query;
+        
+        const results = await Results.find({ username })
+            .sort({ createdAt: -1 })
+            .limit(limit * 1)
+            .skip((page - 1) * limit);
+
+        const total = await Results.countDocuments({ username });
+
+        const detailedResults = results.map(result => ({
+            id: result._id,
+            date: result.createdAt,
+            score: result.percentage,
+            points: result.points,
+            totalQuestions: result.totalQuestions,
+            correctAnswers: result.result.filter((answer, index) => 
+                answer === result.correctAnswers[index]
+            ).length,
+            timeTaken: result.timeTaken,
+            attempts: result.attempts,
+            achievement: result.achived
+        }));
+
+        res.json({
+            results: detailedResults,
+            pagination: {
+                current: page,
+                total: Math.ceil(total / limit),
+                hasNext: page < Math.ceil(total / limit),
+                hasPrev: page > 1
+            },
+            summary: {
+                totalQuizzes: total,
+                averageScore: detailedResults.length > 0 
+                    ? Math.round(detailedResults.reduce((sum, r) => sum + r.score, 0) / detailedResults.length)
+                    : 0
+            }
+        });
+    } catch (error) {
+        res.json({ error: error.message })
     }
 }
